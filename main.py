@@ -22,7 +22,7 @@ def run(args):
     if args["debug"]:
         args["dataset_args"]["reuse_transient"] = True
     # h.save_stats_datasets(device, args)
-    dataset = AslDataset(device=device, batch_first=True, **args).stoi()
+    dataset = AslDataset(device=device, **args).stoi()
 
     if args["debug"]:
         dataset = dataset.truncated(args["cv"] * 10)

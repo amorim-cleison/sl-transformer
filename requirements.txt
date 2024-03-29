@@ -4,8 +4,8 @@ charset-normalizer==3.3.2
 click==8.1.7
 cloudpickle==3.0.0
 colorama==0.4.6
--e git+https://github.com/amorim-cleison/commons-python.git@70efe0686dd295bd3e57d9c957aed80fcf3348f5#egg=commons
--e git+https://github.com/amorim-cleison/commons-python.git@70efe0686dd295bd3e57d9c957aed80fcf3348f5#egg=commons_python
+-e git+https://github.com/amorim-cleison/commons-python.git@248f501b9cfe69802be6d226aabfe6b6825ca99c#egg=commons
+-e git+https://github.com/amorim-cleison/commons-python.git@248f501b9cfe69802be6d226aabfe6b6825ca99c#egg=commons_python
 contourpy==1.2.0
 dask==2024.1.1
 dask-cuda==24.2.0
@@ -52,9 +52,11 @@ tabulate==0.9.0
 tblib==3.0.0
 threadpoolctl==3.4.0
 toolz==0.12.1
-torch==2.2.0
+torch==2.2.1+cu118
+torchaudio==2.2.1+cu118
 torchdata==0.7.1
 torchtext==0.6.0
+torchvision==0.17.1+cu118
 tornado==6.4
 tqdm==4.66.2
 typing_extensions==4.10.0

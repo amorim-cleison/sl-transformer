@@ -18,6 +18,8 @@ ARGUMENTS = [
              help='Max epochs'),
     Argument('-bs', '--batch_size', type=int, required=True,
              help='Batch size'),
+    Argument('-bf', '--batch_first', type=int, required=False,
+             help='Batch first'),
     Argument('-ts', '--test_size', type=float, required=True,
              help='Test size'),
     Argument('-es',

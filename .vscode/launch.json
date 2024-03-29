@@ -6,11 +6,13 @@
     "configurations": [
         {
             "name": "Debug",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "main",
             "console": "integratedTerminal",
             "justMyCode": false,
+            "python": ".venv/Scripts/python.exe",
+            "cwd": "${workspaceFolder}",
             "args": [
                 "-c",
                 "config/config-transformer.yaml",
@@ -30,7 +32,7 @@
         },
         {
             "name": "Transformer",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "main",
             "console": "integratedTerminal",
@@ -39,7 +41,7 @@
         },
         {
             "name": "Enc-Dec GRU Attn",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "main",
             "console": "integratedTerminal",
@@ -48,7 +50,7 @@
         },
         {
             "name": "Enc-Dec LSTM Attn",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "main",
             "console": "integratedTerminal",
@@ -59,7 +61,7 @@
         // (DEBUG) Out
         {
             "name": "(Debug) Out",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "read_out",
             "console": "integratedTerminal",

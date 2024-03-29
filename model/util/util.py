@@ -42,7 +42,7 @@ def generate_mask(data, batch_first=False):
     return mask
 
 
-def generate_padding_mask(data, vocab):
+def generate_padding_mask(data, vocab, batch_first=False):
     """
     Padding mask provides specified elements in the key to be ignored
     by the attention. If a ByteTensor is provided, the non-zero
@@ -56,8 +56,6 @@ def generate_padding_mask(data, vocab):
 
     if mask.ndim < 2:
         mask = mask.unsqueeze(-1)
-    elif mask.ndim >= 2:
-        mask = mask.transpose(0, 1)
     return mask
 
 

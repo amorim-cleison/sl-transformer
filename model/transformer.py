@@ -42,7 +42,8 @@ class Transformer(nn.Module):
                                           num_encoder_layers=num_layers,
                                           num_decoder_layers=num_layers,
                                           dim_feedforward=hidden_size,
-                                          dropout=dropout)
+                                          dropout=dropout,
+                                          batch_first=batch_first)
         self.linear = nn.Linear(in_features=embedding_size,
                                 out_features=output_size)
         self.softmax = nn.functional.log_softmax
@@ -65,12 +66,12 @@ class Transformer(nn.Module):
         tgt = self.adjust_batch_in(y)
 
         # Masks:
-        src_mask = generate_mask(src).to(self.device)
-        tgt_mask = generate_mask(tgt).to(self.device)
+        src_mask = generate_mask(src, self.batch_first).to(self.device)
+        tgt_mask = generate_mask(tgt, self.batch_first).to(self.device)
         src_padding_mask = \
-            generate_padding_mask(src, self.src_vocab).to(self.device)
+            generate_padding_mask(src, self.src_vocab, self.batch_first).to(self.device)
         tgt_padding_mask = \
-            generate_padding_mask(tgt, self.tgt_vocab).to(self.device)
+            generate_padding_mask(tgt, self.tgt_vocab, self.batch_first).to(self.device)
 
         # Embeddings:
         src_embed = self.forward_embedding(src, self.src_embedding,
@@ -90,17 +91,14 @@ class Transformer(nn.Module):
         return self.adjust_batch_out(output)
 
     def adjust_batch_in(self, data):
-        """Transformer requires to be in the shape `(S,N,E)` where `S` is the
-        sequence length, `N` batch size, and `E` is the feature number."""
         if data.ndim < 2:
             data = data.unsqueeze(-1)
-        if self.batch_first:
-            data = data.transpose(1, 0)
         return data
 
     def adjust_batch_out(self, data):
         if data.ndim > 2:
-            data = data.squeeze(dim=0)
+            features_dim = 1 if self.batch_first else 0
+            data = data.squeeze(dim=features_dim)
         return data
 
     def forward_embedding(self, x, embedding, pos_encoding):

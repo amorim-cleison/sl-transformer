@@ -40,7 +40,7 @@ def dump_args(args):
 
 def build_net_params(model_args, model, optimizer, criterion, callbacks,
                      callbacks_names, device, dataset, optimizer_args,
-                     criterion_args, **kwargs):
+                     criterion_args, cv, **kwargs):
     src_vocab = dataset.vocab_X
     tgt_vocab = dataset.vocab_y
 
@@ -95,6 +95,7 @@ def build_net_params(model_args, model, optimizer, criterion, callbacks,
         "criterion": locate(criterion),
         "callbacks": callbacks,
         "dataset": AslDataset,
+        "train_split": ValidSplit(cv),
         **_net_args,
         **_module_args,
         **_optimizer_args,

@@ -10,6 +10,7 @@ scoring: [neg_log_loss, accuracy, precision_weighted, recall_weighted, f1_weight
 max_epochs: 200
 batch_size: 50
 test_size: 0.15
+batch_first: True
 
 early_stopping:
   patience: 30
