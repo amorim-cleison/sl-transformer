@@ -1,2 +1,1 @@
-# from .encoder_decoder_attn import EncoderDecoderAttnBase
-from .encoder_decoder_attn_bkp import EncoderDecoderAttnBaseBkp
+from .encoder_decoder_attn import EncoderDecoderAttnBase

@@ -1,261 +1,381 @@
-# """
-# Module to represents whole models
-# """
-
-# import model.util as util
-# import torch.nn.functional as F
-# from joeynmt.decoders import Decoder, RecurrentDecoder
-# from joeynmt.embeddings import Embeddings
-# from joeynmt.encoders import Encoder, RecurrentEncoder
-# from joeynmt.initialization import initialize_model
-# from joeynmt.model import Model
-# from joeynmt.vocabulary import Vocabulary
-# from torch import Tensor, nn
-# import torch
+# -----------------------------------------------------------
+# This implementation was taken from (with some minor adjustments):
+#
+# J Bastings. 2018. The Annotated Encoder-Decoder with Attention.
+# https://bastings.github.io/annotated_encoder_decoder/
+# -----------------------------------------------------------
+import model.util as util
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
-# class CustomModel(Model):
-#     def __init__(self, encoder: Encoder, decoder: Decoder,
-#                  src_embed: Embeddings, trg_embed: Embeddings,
-#                  src_vocab: Vocabulary, trg_vocab: Vocabulary) -> None:
-#         super(CustomModel, self).__init__(encoder, decoder, src_embed,
-#                                           trg_embed, src_vocab, trg_vocab)
+class EncoderDecoder(nn.Module):
+    """
+    A standard Encoder-Decoder architecture. Base for this and many
+    other models.
+    """
+    def __init__(self,
+                 encoder,
+                 decoder,
+                 src_embed,
+                 trg_embed,
+                 generator,
+                 max_output_len=None):
+        super(EncoderDecoder, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_embed = src_embed
+        self.trg_embed = trg_embed
+        self.generator = generator
+        self.max_output_len = max_output_len
 
-#     def forward(self, return_type: str = None, **kwargs) \
-#             -> (Tensor, Tensor, Tensor, Tensor):
-#         """ Interface for multi-gpu
+    def forward(self, src, trg, src_mask, trg_mask, src_lengths, trg_lengths):
+        """Take in and process masked src and target sequences."""
+        encoder_hidden, encoder_final = self.encode(src, src_mask, src_lengths,
+                                                    self.src_embed.padding_idx)
+        # return self.decode(encoder_hidden, encoder_final, src_mask, trg,
+        #                    trg_mask)
+        out, _, _ = self.decode(encoder_hidden,
+                                encoder_final,
+                                src_mask,
+                                trg,
+                                trg_mask,
+                                max_len=self.max_output_len)
+        return self.generator(out)
 
-#         For DataParallel, We need to encapsulate all model call: model.encode(),
-#         model.decode(), and model.encode_decode() by model.__call__().
-#         model.__call__() triggers model.forward() together with pre hooks
-#         and post hooks, which take care of multi-gpu distribution.
+    def encode(self, src, src_mask, src_lengths, src_padding_idx):
+        return self.encoder(self.src_embed(src), src_mask, src_lengths,
+                            src_padding_idx)
 
-#         :param return_type: one of {"softmax", "loss", "encode", "decode"}
-#         """
-#         if return_type is None:
-#             raise ValueError("Please specify return_type: "
-#                              "{`softmax`, `loss`, `encode`, `decode`}.")
-
-#         return_tuple = (None, None, None, None)
-
-#         if return_type == "softmax":
-#             out, x, _, _ = self._encode_decode(**kwargs)
-
-#             # compute log probs
-#             log_probs = F.log_softmax(out, dim=-1)
-#             return_tuple = (log_probs, None, None, None)
-#         else:
-#             return_tuple = super().forward(return_type, **kwargs)
-
-#         return return_tuple
+    def decode(self,
+               encoder_hidden,
+               encoder_final,
+               src_mask,
+               trg,
+               trg_mask,
+               decoder_hidden=None,
+               max_len=None):
+        return self.decoder(self.trg_embed(trg),
+                            encoder_hidden,
+                            encoder_final,
+                            src_mask,
+                            trg_mask,
+                            hidden=decoder_hidden,
+                            max_len=max_len)
 
 
-# class EncoderDecoderAttnBase(nn.Module):
-#     def __init__(self,
-#                  src_vocab,
-#                  tgt_vocab,
-#                  batch_first,
-#                  rnn_type,
-#                  embedding_size=256,
-#                  hidden_size=512,
-#                  num_layers=1,
-#                  dropout=0.1,
-#                  **kwargs):
-#         super(EncoderDecoderAttnBase, self).__init__()
+class Generator(nn.Module):
+    """Define standard linear + softmax generation step."""
+    def __init__(self, hidden_size, vocab_size):
+        super(Generator, self).__init__()
+        self.proj = nn.Linear(hidden_size, vocab_size, bias=False)
 
-#         assert (rnn_type in {"gru", "lstm", "transformer"}), "Invalid RNN type"
+    def forward(self, x):
+        return F.log_softmax(self.proj(x), dim=-1)
 
-#         self.src_vocab = src_vocab
-#         self.tgt_vocab = tgt_vocab
 
-#         # Pad index:
-#         # src_padding_idx = src_vocab.stoi[PAD_TOKEN]
-#         # trg_padding_idx = trg_vocab.stoi[PAD_TOKEN]
-#         src_pad_idx = util.get_pad_idx(src_vocab)
-#         tgt_pad_idx = util.get_pad_idx(tgt_vocab)
+class Encoder(nn.Module):
+    """Encodes a sequence of word embeddings"""
+    def __init__(self,
+                 input_size,
+                 hidden_size,
+                 rnn_class,
+                 num_layers=1,
+                 dropout=0.,
+                 batch_first=True):
+        super(Encoder, self).__init__()
+        self.num_layers = num_layers
+        self.batch_first = batch_first
+        self.rnn = rnn_class(input_size=input_size,
+                             hidden_size=hidden_size,
+                             num_layers=num_layers,
+                             batch_first=batch_first,
+                             bidirectional=True,
+                             dropout=dropout if num_layers > 1 else 0.)
 
-#         # Vocab size:
-#         src_vocab_size = len(src_vocab)
-#         tgt_vocab_size = len(tgt_vocab)
+    def forward(self, X, mask, lengths, padding_idx):
+        """
+        Applies a bidirectional RNN to sequence of embeddings x.
+        The input mini-batch x needs to be sorted by length.
+        x should have dimensions [batch, time, dim].
+        """
+        total_length = X.size(1)
 
-#         # src_embed = Embeddings(
-#         #     **cfg["encoder"]["embeddings"], vocab_size=len(src_vocab),
-#         #     padding_idx=src_padding_idx)
-#         src_embed = Embeddings(embedding_dim=embedding_size,
-#                                vocab_size=src_vocab_size,
-#                                padding_idx=src_pad_idx,
-#                                scale=False,
-#                                freeze=False)
+        packed = pack_padded_sequence(X,
+                                      lengths.cpu(),
+                                      batch_first=self.batch_first,
+                                      enforce_sorted=False)
+        output, hidden = self.rnn(packed)
 
-#         # this ties source and target embeddings
-#         # for softmax layer tying, see further below
-#         # if cfg.get("tied_embeddings", False):
-#         #     if src_vocab.itos == trg_vocab.itos:
-#         #         # share embeddings for src and trg
-#         #         trg_embed = src_embed
-#         #     else:
-#         #         raise ConfigurationError(
-#         #             "Embedding cannot be tied since vocabularies differ.")
-#         # else:
-#         #     trg_embed = Embeddings(
-#         #         **cfg["decoder"]["embeddings"], vocab_size=len(trg_vocab),
-#         #         padding_idx=trg_padding_idx)
+        if isinstance(hidden, tuple):
+            hidden, memory_cell = hidden
 
-#         trg_embed = Embeddings(embedding_dim=embedding_size,
-#                                vocab_size=tgt_vocab_size,
-#                                padding_idx=tgt_pad_idx,
-#                                scale=False,
-#                                freeze=False)
+        output, _ = pad_packed_sequence(output,
+                                        batch_first=self.batch_first,
+                                        total_length=total_length,
+                                        padding_value=padding_idx)
 
-#         # build encoder
-#         # enc_dropout = cfg["encoder"].get("dropout", 0.)
-#         # enc_emb_dropout = cfg["encoder"]["embeddings"].get("dropout", enc_dropout)
-#         # if cfg["encoder"].get("type", "recurrent") == "transformer":
-#         #     assert cfg["encoder"]["embeddings"]["embedding_dim"] == \
-#         #         cfg["encoder"]["hidden_size"], \
-#         #         "for transformer, emb_size must be hidden_size"
+        # we need to manually concatenate the final states for both directions
+        hidden_concat = self.concatenate_directions(hidden)
 
-#         #     encoder = TransformerEncoder(**cfg["encoder"],
-#         #                                 emb_size=src_embed.embedding_dim,
-#         #                                 emb_dropout=enc_emb_dropout)
-#         # else:
-#         #     encoder = RecurrentEncoder(**cfg["encoder"],
-#         #                             emb_size=src_embed.embedding_dim,
-#         #                             emb_dropout=enc_emb_dropout)
+        return output, hidden_concat
 
-#         encoder = RecurrentEncoder(
-#             rnn_type=rnn_type,
-#             hidden_size=hidden_size,
-#             emb_size=src_embed.embedding_dim,
-#             num_layers=num_layers,
-#             dropout=dropout,
-#             #    emb_dropout=dropout,
-#             bidirectional=True,
-#             freeze=False)
+    def concatenate_directions(self, hidden):
+        fwd_hidden = hidden[0:hidden.size(0):2]
+        bwd_hidden = hidden[1:hidden.size(0):2]
+        hidden_concat = torch.cat([fwd_hidden, bwd_hidden],
+                                  dim=2)  # [num_layers, batch, 2*dim]
+        return hidden_concat
 
-#         # build decoder
-#         # dec_dropout = cfg["decoder"].get("dropout", 0.)
-#         # dec_emb_dropout = cfg["decoder"]["embeddings"].get("dropout", dec_dropout)
-#         # if cfg["decoder"].get("type", "recurrent") == "transformer":
-#         #     decoder = TransformerDecoder(
-#         #         **cfg["decoder"], encoder=encoder, vocab_size=len(trg_vocab),
-#         #         emb_size=trg_embed.embedding_dim, emb_dropout=dec_emb_dropout)
-#         # else:
-#         #     decoder = RecurrentDecoder(
-#         #         **cfg["decoder"], encoder=encoder, vocab_size=len(trg_vocab),
-#         #         emb_size=trg_embed.embedding_dim, emb_dropout=dec_emb_dropout)
 
-#         decoder = RecurrentDecoder(
-#             rnn_type=rnn_type,
-#             emb_size=trg_embed.embedding_dim,
-#             hidden_size=hidden_size,
-#             encoder=encoder,
-#             num_layers=num_layers,
-#             vocab_size=tgt_vocab_size,
-#             dropout=dropout,
-#             #    emb_dropout=dropout,
-#             hidden_dropout=dropout,
-#             input_feeding=True,
-#             attention="bahdanau",
-#             init_hidden="bridge",
-#             freeze=False)
+class Decoder(nn.Module):
+    """A conditional RNN decoder with attention."""
+    def __init__(self,
+                 emb_size,
+                 hidden_size,
+                 attention,
+                 rnn_class,
+                 num_layers=1,
+                 dropout=0.5,
+                 bridge=True,
+                 batch_first=True):
+        super(Decoder, self).__init__()
 
-#         model = CustomModel(encoder=encoder,
-#                             decoder=decoder,
-#                             src_embed=src_embed,
-#                             trg_embed=trg_embed,
-#                             src_vocab=src_vocab,
-#                             trg_vocab=tgt_vocab)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.attention = attention
+        self.dropout = dropout
+        self.batch_first = batch_first
 
-#         # tie softmax layer with trg embeddings
-#         # if cfg.get("tied_softmax", False):
-#         #     if trg_embed.lut.weight.shape == \
-#         #             model.decoder.output_layer.weight.shape:
-#         #         # (also) share trg embeddings and softmax layer:
-#         #         model.decoder.output_layer.weight = trg_embed.lut.weight
-#         #     else:
-#         #         raise ConfigurationError(
-#         #             "For tied_softmax, the decoder embedding_dim and decoder "
-#         #             "hidden_size must be the same."
-#         #             "The decoder must be a Transformer.")
+        self.rnn = rnn_class(input_size=(emb_size + 2 * hidden_size),
+                             hidden_size=hidden_size,
+                             num_layers=num_layers,
+                             batch_first=batch_first,
+                             dropout=dropout if num_layers > 1 else 0.)
 
-#         # custom initialization of model parameters
-#         initialize_model(model, {}, src_pad_idx, tgt_pad_idx)
+        # to initialize from the final encoder state
+        self.bridge = nn.Linear(2 * hidden_size, hidden_size,
+                                bias=True) if bridge else None
 
-#         # initialize embeddings from file
-#         # pretrained_enc_embed_path = cfg["encoder"]["embeddings"].get(
-#         #     "load_pretrained", None)
-#         # pretrained_dec_embed_path = cfg["decoder"]["embeddings"].get(
-#         #     "load_pretrained", None)
-#         # if pretrained_enc_embed_path:
-#         #     logger.info("Loading pretraind src embeddings...")
-#         #     model.src_embed.load_from_file(pretrained_enc_embed_path, src_vocab)
-#         # if pretrained_dec_embed_path and not cfg.get("tied_embeddings", False):
-#         #     logger.info("Loading pretraind trg embeddings...")
-#         #     model.trg_embed.load_from_file(pretrained_dec_embed_path, trg_vocab)
+        self.dropout_layer = nn.Dropout(p=dropout)
+        self.pre_output_layer = nn.Linear(
+            (hidden_size + 2 * hidden_size + emb_size),
+            hidden_size,
+            bias=False)
 
-#         # logger.info("Enc-dec model built.")
+    def forward_step(self, prev_embed, encoder_hidden, src_mask, proj_key,
+                     hidden):
+        """Perform a single decoder step (1 word)"""
 
-#         self.model = model
+        # compute context vector using attention mechanism
+        # query = hidden[-1].unsqueeze(1)  # [#layers, B, D] -> [B, 1, D]
+        query = self.get_query(hidden)
+        context, attn_probs = self.attention(query=query,
+                                             proj_key=proj_key,
+                                             value=encoder_hidden,
+                                             mask=src_mask)
 
-#     def forward(self, X, y, lengths, **kwargs):
-#         # def forward(self, return_type: str = None, **kwargs) -> (Tensor, Tensor, Tensor, Tensor):
-#         # def _encode_decode(self, src: Tensor, trg_input: Tensor, src_mask: Tensor,
-#         #                    src_length: Tensor, trg_mask: Tensor = None, **kwargs) -> (Tensor, Tensor, Tensor, Tensor):
+        # update rnn hidden state
+        rnn_input = torch.cat([prev_embed, context], dim=2)
+        output, hidden = self.rnn(rnn_input, hidden)
 
-#         X, y, lengths = self.sort_by_lengths(X, y, lengths)
+        pre_output = torch.cat([prev_embed, output, context], dim=2)
+        pre_output = self.dropout_layer(pre_output)
+        pre_output = self.pre_output_layer(pre_output)
 
-#         src = X
-#         tgt = y
-#         # tgt = self.create_bos_tensor_like(tgt, self.tgt_vocab)
+        return output, hidden, pre_output
 
-#         if (tgt.ndim < 2):
-#             tgt = tgt.unsqueeze(dim=-1)
-#         # tgt = self.prepend_bos(tgt, self.tgt_vocab)
+    def forward(
+            self,
+            trg_embed,
+            encoder_hidden,  # encoder_output - hidden states from the encoder, shape (batch_size, src_length, encoder.output_size)
+            encoder_final,  # encoder_hidden - last state from the encoder, shape (batch_size, encoder.output_size)
+            src_mask,
+            trg_mask,
+            hidden=None,
+            max_len=None):
+        """Unroll the decoder one step at a time."""
 
-#         # Masks:
-#         src_mask = self.generate_mask(src, self.src_vocab)
-#         tgt_mask = self.generate_mask(tgt, self.tgt_vocab)
+        # the maximum number of steps to unroll the RNN
+        if max_len is None:
+            max_len = trg_mask.size(-1)
 
-#         # Lengths:
-#         src_lengths = lengths
-#         # tgt_lengths = util.resolve_lengths(tgt, self.tgt_vocab)
+        # initialize decoder hidden state
+        if hidden is None:
+            hidden = self.init_hidden(encoder_final)
 
-#         output, _, _, _ = self.model(
-#             return_type='softmax',
-#             src=src,
-#             trg_input=tgt,
-#             src_mask=src_mask,
-#             src_length=src_lengths,
-#             trg_mask=tgt_mask,
-#         )
-#         return output[:, -1]
+        # pre-compute projected encoder hidden states
+        # (the "keys" for the attention mechanism)
+        # this is only done for efficiency
+        proj_key = self.attention.key_layer(encoder_hidden)
 
-#     def generate_mask(self, data, vocab):
-#         pad_idx = util.get_pad_idx(vocab)
-#         return (data != pad_idx).unsqueeze(1)
+        # here we store all intermediate hidden states and pre-output vectors
+        decoder_states = []
+        pre_output_vectors = []
 
-#     def sort_by_lengths(self, X, y, lengths):
-#         def tensor_like(data, like):
-#             if (data[0].ndim == 0):
-#                 return torch.tensor(data, dtype=like.dtype, device=like.device)
-#             else:
-#                 return torch.cat(data).view(like.size())
+        # unroll the decoder RNN for max_len steps
+        for i in range(max_len):
+            prev_embed = trg_embed[:, i].unsqueeze(1)  # batch, 1, emb
+            output, hidden, pre_output = self.forward_step(
+                prev_embed=prev_embed,
+                encoder_hidden=encoder_hidden,
+                src_mask=src_mask,
+                proj_key=proj_key,
+                hidden=hidden)
+            decoder_states.append(output)
+            pre_output_vectors.append(pre_output)
 
-#         _lengths_dim = -1
-#         _sorted = sorted(zip(X, y, lengths),
-#                          key=lambda item: item[_lengths_dim],
-#                          reverse=True)
-#         _X, _y, _lengths = zip(*_sorted)
-#         return (tensor_like(_X,
-#                             X), tensor_like(_y,
-#                                             y), tensor_like(_lengths, lengths))
+        decoder_states = torch.cat(decoder_states, dim=1)
+        pre_output_vectors = torch.cat(pre_output_vectors, dim=1)
+        return decoder_states, hidden, pre_output_vectors  # [B, N, D]
 
-#     def prepend_bos(self, data, vocab):
-#         bos_data = self.create_bos_tensor_like(data, vocab)
-#         return torch.cat([bos_data, data], dim=1).to(data.device)
+    def init_hidden(self, encoder_final):
+        """Returns the initial decoder state,
+        conditioned on the final encoder state."""
 
-#     def create_bos_tensor_like(self, data, vocab):
-#         batch_size = data.size(0)
-#         bos_idx = util.get_bos_idx(vocab)
-#         return torch.full((batch_size, 1), bos_idx).to(data.device)
+        if encoder_final is None:
+            return None  # start with zeros
+
+        # return torch.tanh(self.bridge(encoder_final))
+        hidden = torch.tanh(self.bridge(encoder_final))
+
+        if isinstance(self.rnn, nn.LSTM):
+            hidden = (hidden, hidden)
+        return hidden
+
+    def get_query(self, hidden):
+        if isinstance(hidden, tuple):
+            hidden, _ = hidden
+        return hidden[-1].unsqueeze(1)  # [#layers, B, D] -> [B, 1, D]
+
+
+class BahdanauAttention(nn.Module):
+    """Implements Bahdanau (MLP) attention"""
+    def __init__(self, hidden_size, key_size=None, query_size=None):
+        super(BahdanauAttention, self).__init__()
+
+        # We assume a bi-directional encoder so key_size is 2*hidden_size
+        key_size = 2 * hidden_size if key_size is None else key_size
+        query_size = hidden_size if query_size is None else query_size
+
+        self.key_layer = nn.Linear(key_size, hidden_size, bias=False)
+        self.query_layer = nn.Linear(query_size, hidden_size, bias=False)
+        self.energy_layer = nn.Linear(hidden_size, 1, bias=False)
+
+        # to store attention scores
+        self.alphas = None
+
+    def forward(self, query=None, proj_key=None, value=None, mask=None):
+        assert mask is not None, "mask is required"
+
+        # We first project the query (the decoder state).
+        # The projected keys (the encoder states) were already pre-computated.
+        query = self.query_layer(query)
+
+        # Calculate scores.
+        scores = self.energy_layer(torch.tanh(query + proj_key))
+        scores = scores.squeeze(2).unsqueeze(1)
+
+        # Mask out invalid positions.
+        # The mask marks valid positions so we invert it using `mask & 0`.
+        scores.data.masked_fill_(mask == 0, -float('inf'))
+
+        # Turn scores to probabilities.
+        alphas = F.softmax(scores, dim=-1)
+        self.alphas = alphas
+
+        # The context vector is the weighted sum of the values.
+        context = torch.bmm(alphas, value)
+
+        # context shape: [B, 1, 2D], alphas shape: [B, 1, M]
+        return context, alphas
+
+
+class EncoderDecoderAttnBase(nn.Module):
+
+    MAX_OUTPUT_LEN = 1
+
+    RNN_CLASSES = {"gru": nn.GRU, "lstm": nn.LSTM}
+
+    def __init__(self,
+                 src_vocab,
+                 tgt_vocab,
+                 batch_first,
+                 rnn_type,
+                 embedding_size=256,
+                 hidden_size=512,
+                 num_layers=1,
+                 dropout=0.1,
+                 **kwargs):
+        super(EncoderDecoderAttnBase, self).__init__()
+        assert (rnn_type in self.RNN_CLASSES), "Invalid `rnn_type`."
+        rnn_class = self.RNN_CLASSES[rnn_type]
+
+        self.batch_first = batch_first
+        self.src_vocab = src_vocab
+        self.tgt_vocab = tgt_vocab
+
+        # Pad index:
+        src_pad_idx = util.get_pad_idx(src_vocab)
+        tgt_pad_idx = util.get_pad_idx(tgt_vocab)
+
+        # Vocab size:
+        src_vocab_size = len(src_vocab)
+        tgt_vocab_size = len(tgt_vocab)
+
+        self.model = EncoderDecoder(
+            Encoder(input_size=embedding_size,
+                    hidden_size=hidden_size,
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    rnn_class=rnn_class,
+                    batch_first=batch_first),
+            Decoder(emb_size=embedding_size,
+                    hidden_size=hidden_size,
+                    attention=BahdanauAttention(hidden_size),
+                    num_layers=num_layers,
+                    dropout=dropout,
+                    rnn_class=rnn_class,
+                    batch_first=batch_first),
+            nn.Embedding(num_embeddings=src_vocab_size,
+                         embedding_dim=embedding_size,
+                         padding_idx=src_pad_idx),
+            nn.Embedding(num_embeddings=tgt_vocab_size,
+                         embedding_dim=embedding_size,
+                         padding_idx=tgt_pad_idx),
+            Generator(hidden_size=hidden_size, vocab_size=tgt_vocab_size),
+            max_output_len=self.MAX_OUTPUT_LEN)
+
+    def to(self, device):
+        self.model = self.model.to(device)
+        self.device = device
+        return super().to(device)
+
+    def forward(self, X, y, lengths, **kwargs):
+        src = X
+        tgt = self.prepend_bos(y, self.tgt_vocab)
+
+        # Masks:
+        src_mask = self.generate_mask(src, self.src_vocab)
+        tgt_mask = self.generate_mask(tgt, self.tgt_vocab)
+
+        # Lengths:
+        src_lengths = lengths
+        tgt_lengths = util.resolve_lengths(tgt, self.tgt_vocab)
+
+        output = self.model(src, tgt, src_mask, tgt_mask, src_lengths,
+                            tgt_lengths)
+        return output[:, -1]
+
+    def generate_mask(self, data, vocab):
+        pad_idx = util.get_pad_idx(vocab)
+        return (data != pad_idx).unsqueeze(1)
+
+    def prepend_bos(self, data, vocab):
+        batch_size = data.size(0)
+        data = data.unsqueeze(1)
+        bos_idx = util.get_bos_idx(vocab)
+        bos_data = torch.full((batch_size, 1), bos_idx).to(self.device)
+        return torch.cat([bos_data, data], dim=1)

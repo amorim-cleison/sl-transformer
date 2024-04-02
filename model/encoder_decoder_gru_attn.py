@@ -1,6 +1,6 @@
-from model.base import EncoderDecoderAttnBaseBkp
+from model.base import EncoderDecoderAttnBase
 
 
-class EncoderDecoderGRUAttn(EncoderDecoderAttnBaseBkp):
+class EncoderDecoderGRUAttn(EncoderDecoderAttnBase):
     def __init__(self, **kwargs):
         super(EncoderDecoderGRUAttn, self).__init__(rnn_type='gru', **kwargs)
